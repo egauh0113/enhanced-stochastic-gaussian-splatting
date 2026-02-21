@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enhanced_stochastic_gaussian_splatting"
+version = "0.1.0"
+description = "Enhanced Stochastic Gaussian Splatting"
+authors = [
+    { name = "Eugene Auh", email = "egauh@g.skku.edu" }
+]
+license = { file = "LICENSE" }
+readme = { file = "README.md", "content-type" = "text/markdown" }
+
+dependencies = [
+    "gsplat==1.5.3",
+    "numpy==1.24.0",
+    "opencv-python==4.5.5.64",
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
