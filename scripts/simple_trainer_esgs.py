@@ -18,7 +18,7 @@
 # Original Author: nerfstudio-project
 # Original License: Apache-2.0
 # Original Source: https://github.com/nerfstudio-project/gsplat
-# 
+#
 # Modifications: This file was modified by Eugene Auh in 2026,
 #                to implement Enhanced Stochastic Gaussian Splatting.
 # -----------------------------------------------------------------------------
@@ -68,6 +68,7 @@ from enhanced_stochastic_gaussian_splatting.losses.enhanced_sc import (
 )
 from enhanced_stochastic_gaussian_splatting.losses.laplace_nll_loss import (
     laplace_nll_loss,
+    calc_div,
     var2div,
 )
 from enhanced_stochastic_gaussian_splatting.utils.transforms import (
@@ -236,6 +237,7 @@ class Config:
     # Use Laplace NLL loss instead of L1 loss for uncertainty training.
     use_nll_loss: bool = True
     div_tilde: float = 0.002
+    rep_method: Literal["mean", "median"] = "median"
 
     # Which GS parameters to include in VI.
     vi_means: bool = True
@@ -731,14 +733,6 @@ class Runner:
                 if self.cfg.vi_scales
                 else torch.exp(self.splats["scales"])
             )  # [N, 3]. Random only on x and y axes.
-            # TODO: check
-            # scales = torch.exp(
-            #     self.splats["scales"]
-            #     + (
-            #         self.v2l["scales"](self.splats["scales_cov"])
-            #         @ torch.randn_like(self.splats["scales"])[..., None]
-            #     ).squeeze(-1)
-            # ) if self.cfg.vi_scales else torch.exp(self.splats["scales"])  # [N, 3]
             opacities = (
                 torch.sigmoid(
                     self.splats["opacities"]
@@ -1010,17 +1004,29 @@ class Runner:
             loss = 0.0
 
             image_stack = torch.stack(yc_hat, dim=-1)
-            mean_image = image_stack.mean(dim=-1) if self.is_vi else yc_hat[0]
+            rep_image = (
+                yc_hat[0]
+                if not self.is_vi
+                else (
+                    image_stack.mean(dim=-1)
+                    if cfg.rep_method == "mean" or not cfg.use_nll_loss
+                    else image_stack.median(dim=-1).values
+                )
+            )
             var_image = (
                 image_stack.var(dim=-1)
                 if self.is_vi
-                else torch.ones_like(mean_image) * 1e-8
+                else torch.ones_like(rep_image) * 1e-8
             )
             if self.is_vi and cfg.use_nll_loss:
-                div_image = var2div(var_image)
-                nllloss = laplace_nll_loss(mean_image, pixels, div_image, full=True)
+                div_image = (
+                    var2div(var_image)
+                    if cfg.rep_method == "mean"
+                    else calc_div(image_stack)
+                )
+                nllloss = laplace_nll_loss(rep_image, pixels, div_image, full=True)
                 ssimloss = 1.0 - self.ssim(
-                    pixels.permute(0, 3, 1, 2), mean_image.permute(0, 3, 1, 2)
+                    pixels.permute(0, 3, 1, 2), rep_image.permute(0, 3, 1, 2)
                 )
                 ssimloss = ssimloss / len(yc_hat)
                 loss += (
@@ -1028,9 +1034,9 @@ class Runner:
                     + ssimloss * cfg.ssim_lambda
                 )
             else:
-                l1loss = F.l1_loss(mean_image, pixels)
+                l1loss = F.l1_loss(rep_image, pixels)
                 ssimloss = 1.0 - self.ssim(
-                    pixels.permute(0, 3, 1, 2), mean_image.permute(0, 3, 1, 2)
+                    pixels.permute(0, 3, 1, 2), rep_image.permute(0, 3, 1, 2)
                 )
                 loss += l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
 
@@ -1411,56 +1417,82 @@ class Runner:
 
                 image_stack = torch.stack(yc_hat, dim=-1)  # [1, H, W, 3, S]
 
-                # write mean images
+                # Write representative images.
                 color_mean = image_stack.mean(dim=-1)  # [1, H, W, 3]
                 imageio.imwrite(
                     f"{self.render_dir}/val_{i:04d}_mean_{step}.png",
                     (color_mean.squeeze(0).cpu().numpy() * 255).astype(np.uint8),
                 )
 
-                # write error images
-                colors_err = (color_mean - pixels).abs()  # [1, H, W, 3]
-                mono_err = normalize_variance_image(colors_err)  # [1, H, W, 1]
+                color_median = image_stack.median(dim=-1).values  # [1, H, W, 3]
+                imageio.imwrite(
+                    f"{self.render_dir}/val_{i:04d}_median_{step}.png",
+                    (color_median.squeeze(0).cpu().numpy() * 255).astype(np.uint8),
+                )
+
+                # Write error images
+                mean_err = (color_mean - pixels).abs()  # [1, H, W, 3]
+                mono_err = normalize_variance_image(mean_err)  # [1, H, W, 1]
                 render_err = (
                     apply_float_colormap(mono_err).detach().cpu().squeeze(0).numpy()
                 )  # [1, H, W, 3]
                 imageio.imwrite(
-                    f"{self.render_dir}/val_{i:04d}_err_{step}.png",
+                    f"{self.render_dir}/val_{i:04d}_err_mean_{step}.png",
                     (render_err * 255).astype(np.uint8),
                 )
 
-                # write variance images
+                median_err = (color_median - pixels).abs()  # [1, H, W, 3]
+                mono_err = normalize_variance_image(median_err)  # [1, H, W, 1]
+                render_err = (
+                    apply_float_colormap(mono_err).detach().cpu().squeeze(0).numpy()
+                )  # [1, H, W, 3]
+                imageio.imwrite(
+                    f"{self.render_dir}/val_{i:04d}_err_median_{step}.png",
+                    (render_err * 255).astype(np.uint8),
+                )
+
+                # Write distribution images.
                 colors_var = image_stack.var(dim=-1)  # [1, H, W, 3]
                 mono_var = normalize_variance_image(colors_var)  # [1, H, W, 1]
                 render_var = (
                     apply_float_colormap(mono_var).detach().cpu().squeeze(0).numpy()
                 )  # [1, H, W, 3]
                 imageio.imwrite(
-                    f"{self.render_dir}/val_{i:04d}_var_{step}.png",
+                    f"{self.render_dir}/val_{i:04d}_dist_var_{step}.png",
                     (render_var * 255).astype(np.uint8),
                 )
 
-                # Plot diversity histogram.
-                import matplotlib.pyplot as plt
-
-                colors_div = var2div(colors_var.mean(dim=-1))
-                colors_div = colors_div.detach().cpu()
-                hist, bin_edges = torch.histogram(
-                    colors_div, bins=100, range=(0.0, 0.05)
+                colors_div = calc_div(image_stack)  # [1, H, W, 3]
+                mono_div = normalize_variance_image(colors_div)  # [1, H, W, 1]
+                render_div = (
+                    apply_float_colormap(mono_div).detach().cpu().squeeze(0).numpy()
+                )  # [1, H, W, 3]
+                imageio.imwrite(
+                    f"{self.render_dir}/val_{i:04d}_dist_div_{step}.png",
+                    (render_div * 255).astype(np.uint8),
                 )
-                fig, ax = plt.subplots(figsize=(4.5, 3))
 
-                ax.set_axisbelow(True)
-                ax.minorticks_on()
-                ax.grid(which="major", alpha=0.75)
-                ax.grid(which="minor", axis="x", alpha=0.5)
-                ax.bar(bin_edges[:-1], hist, width=bin_edges[1] - bin_edges[0])
-                ax.set_xlabel("Diversity")
-                ax.set_ylabel("Frequency")
+                # # Plot diversity histogram.
+                # import matplotlib.pyplot as plt
 
-                fig.tight_layout()
-                fig.savefig(f"{self.render_dir}/val_{i:04d}_divhist_{step}.png")
-                plt.close(fig)
+                # colors_div = var2div(colors_var.mean(dim=-1))
+                # colors_div = colors_div.detach().cpu()
+                # hist, bin_edges = torch.histogram(
+                #     colors_div, bins=100, range=(0.0, 0.05)
+                # )
+                # fig, ax = plt.subplots(figsize=(4.5, 3))
+
+                # ax.set_axisbelow(True)
+                # ax.minorticks_on()
+                # ax.grid(which="major", alpha=0.75)
+                # ax.grid(which="minor", axis="x", alpha=0.5)
+                # ax.bar(bin_edges[:-1], hist, width=bin_edges[1] - bin_edges[0])
+                # ax.set_xlabel("Diversity")
+                # ax.set_ylabel("Frequency")
+
+                # fig.tight_layout()
+                # fig.savefig(f"{self.render_dir}/val_{i:04d}_divhist_{step}.png")
+                # plt.close(fig)
 
                 # Close VI for rendering the final image.
                 self.is_vi = False
@@ -1560,7 +1592,7 @@ class Runner:
                     diff_to_error_fn=lambda x: x.square().mean(dim=-3),
                     summarizer_fn=lambda x: x.mean(dim=-1).sqrt().mean(),
                 )
-                metrics["ause_rmse"].append(sc_rmse.compute_AUSC())
+                metrics["ause_rmse"].append(sc_rmse.compute_AUSE())
                 sc_rmse.save_sc(
                     f"{self.render_dir}/val_{i:04d}_sc_rmse_{step}.png",
                     plot_random=True,
@@ -1578,7 +1610,7 @@ class Runner:
                     diff_to_error_fn=lambda x: x.abs().mean(dim=-3),
                     summarizer_fn=lambda x: x.mean(dim=-1).mean(),
                 )
-                metrics["ause_mae"].append(sc_mae.compute_AUSC())
+                metrics["ause_mae"].append(sc_mae.compute_AUSE())
                 sc_mae.save_sc(
                     f"{self.render_dir}/val_{i:04d}_sc_mae_{step}.png", plot_random=True
                 )

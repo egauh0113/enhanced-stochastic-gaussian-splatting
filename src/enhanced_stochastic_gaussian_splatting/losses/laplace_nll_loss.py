@@ -188,6 +188,22 @@ def laplace_nll_loss(
         return loss
 
 
+def calc_div(img: Tensor, eps: float = 1e-6) -> Tensor:
+    """Calculate diversity for Laplace NLL loss using the mean absolute deviation from the median.
+
+    Args:
+        img: [..., S] Tensor of samples.
+        eps: Small value for numerical stability.
+
+    Returns:
+             [...,] Tensor of diversity values.
+    """
+    # image_stack: [1, H, W, 3, S]
+    median = img.median(dim=-1).values  # [1, H, W, 3]
+    div = torch.mean(torch.abs(img - median.unsqueeze(-1)), dim=-1).clamp(min=eps)  # [1, H, W, 3]
+    return div
+
+
 def var2div(var: Tensor, eps: float = 1e-6) -> Tensor:
     """Convert variance to diversity for Laplace NLL loss.
 
