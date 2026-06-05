@@ -5,7 +5,7 @@
 [![Apache License 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 This repository contains the official implementation of
-"Enhanced Stochastic Gaussian splatting via Laplace Negative Log-Likelihood and Geometry-Aware Losses"
+"[Enhanced Stochastic Gaussian splatting via Laplace Negative Log-Likelihood and Geometry-Aware Losses](https://doi.org/10.1109/ARSO68304.2026.11536110)"
 by [Eugene Auh](https://orcid.org/0000-0001-9349-5046) *et al.*
 ([RISE LAB](https://rise.skku.edu), Sungkyunkwan University, Republic fo Korea)
 
