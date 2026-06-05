@@ -9,8 +9,6 @@ This repository contains the official implementation of
 by [Eugene Auh](https://orcid.org/0000-0001-9349-5046) *et al.*
 ([RISE LAB](https://rise.skku.edu), Sungkyunkwan University, Republic fo Korea)
 
-This work has been accepted to the 2026 IEEE International Conference on Advanced Robotics and its Social Impacts (ARSO 2026).
-
 ## Dependencies
 
 This repository requires [gsplat](https://github.com/nerfstudio-project/gsplat) library along with its associated requirements.
@@ -32,7 +30,14 @@ Detailed dependencies are listed in *pyproject.toml* and *requirements.txt*.
 
 If you use this repository in an academic context, please cite the following publication.
 ```bibtex
-TBA
+@inproceedings{auh2026enhanced,
+  title={Enhanced Stochastic Gaussian Splatting via Laplace Negative Log-Likelihood and Geometry-Aware Losses},
+  author={Auh, Eugene and Siriwa, Jenipher and Pico, Nabih and Balozi, Nehemiah and Moon, Hyungpil},
+  booktitle={2026 IEEE International Conference on Advanced Robotics and its Social Impacts (ARSO)},
+  pages={112--117},
+  year={2026},
+  organization={IEEE}
+}
 ```
 
 ## Acknowledgement
