@@ -26,6 +26,11 @@ Detailed dependencies are listed in *pyproject.toml* and *requirements.txt*.
     ```
 - The results will be generated in the *results* directory.
 
+### Efficient Optimization
+
+In *v0.1.1*, images are sampled and the KL divergence loss is computed using the currently active GSs.
+To use entire set of GSs, set *full_sample* to *True* in *simple_trainer_esgs.py*, which corresponds to the results reported in the paper.
+
 ## Citation
 
 If you use this repository in an academic context, please cite the following publication.
@@ -45,3 +50,9 @@ If you use this repository in an academic context, please cite the following pub
 We would like to thank to the authors of following works.
 - [stochastic-gaussian-splatting](https://github.com/mezzelfo/stochastic-gaussian-splatting)
 - [gsplat](https://github.com/nerfstudio-project/gsplat)
+
+## Changelog
+
+- *v0.1.0*: Initial release.
+- *v0.1.1*: Perform MC sampling and KLD computation only on useful GSs.  
+  - Reduced training time by ~50% while maintaining the same level of evaluation metrics. (tested on the  *garden* scene of the Mip-NeRF 360 dataset)

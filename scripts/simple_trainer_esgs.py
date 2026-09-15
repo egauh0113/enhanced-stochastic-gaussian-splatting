@@ -184,15 +184,6 @@ class Config:
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
     pose_noise: float = 0.0
 
-    # Enable appearance optimization. (experimental)
-    app_opt: bool = False
-    # Appearance embedding dimension
-    app_embed_dim: int = 16
-    # Learning rate for appearance optimization
-    app_opt_lr: float = 1e-3
-    # Regularization for appearance optimization as weight decay
-    app_opt_reg: float = 1e-6
-
     # Enable depth loss. (experimental)
     depth_loss: bool = False
     # Weight for depth loss
@@ -225,6 +216,7 @@ class Config:
 
     # Number of VI samples per forward pass.
     n_vi_sample: int = 8
+    full_sample: bool = False
 
     # Weight for KL divergence loss.
     kl_lambda: float = 1e-2
@@ -427,7 +419,25 @@ def create_splats_with_optimizers(
     return splats, optimizers
 
 
-def compute_kl(splats: torch.nn.ParameterDict, cfg: Config) -> torch.Tensor:
+def compute_kl(
+    pc: torch.nn.ParameterDict, cfg: Config, gs_ids: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    """
+    Compute the KL divergence loss between the posterior and prior distributions.
+
+    Args:
+        pc: The Gaussian primitives.
+        cfg: The configuration to check which parameters are stochastic.
+        gs_ids: The indices to compute KL divergence for. If None, compute for all GSs.
+
+    Returns:
+        kl_loss: The KL divergence loss.
+    """
+    if gs_ids is None:
+        gs_ids = torch.arange(len(pc["means"]), device=pc["means"].device)
+    else:
+        assert gs_ids.max() < len(pc["means"]), "gs_ids out of range"
+
     # D_KL(posterior | prior)
     kl_loss = 0.0
 
@@ -437,66 +447,48 @@ def compute_kl(splats: torch.nn.ParameterDict, cfg: Config) -> torch.Tensor:
     # Position.
     if cfg.vi_means:
         kl_p = kld(
-            splats["means"],
-            splats["means_cov"],
-            splats["means_prior"],
-            splats["means_prior_cov"],
+            pc["means"][gs_ids],
+            pc["means_cov"][gs_ids],
+            pc["means_prior"][gs_ids],
+            pc["means_prior_cov"][gs_ids],
         ).mean()
         kl_loss += kl_p
 
     # Color.
-    if not cfg.app_opt:
-        if cfg.vi_sh0:
-            kl_c0 = kld(
-                splats["sh0"],
-                splats["sh0_cov"],
-                splats["sh0_prior"],
-                splats["sh0_prior_cov"],
-            ).mean()
-            kl_loss += kl_c0
-        if cfg.vi_shN:
-            kl_cN = kld(
-                splats["shN"],
-                splats["shN_cov"],
-                splats["shN_prior"],
-                splats["shN_prior_cov"],
-            ).mean()
-            kl_loss += kl_cN
-    else:
-        if cfg.vi_colors:
-            kl_c0 = kld(
-                splats["colors"],
-                splats["colors_cov"],
-                splats["colors_prior"],
-                splats["colors_prior_cov"],
-            ).mean()
-            kl_loss += kl_c0
-        if cfg.vi_features:
-            kl_cN = kld(
-                splats["features"],
-                splats["features_cov"],
-                splats["features_prior"],
-                splats["features_prior_cov"],
-            ).mean()
-            kl_loss += kl_cN
+    if cfg.vi_sh0:
+        kl_c0 = kld(
+            pc["sh0"][gs_ids],
+            pc["sh0_cov"][gs_ids],
+            pc["sh0_prior"][gs_ids],
+            pc["sh0_prior_cov"][gs_ids],
+        ).mean()
+        kl_loss += kl_c0
+    if cfg.vi_shN:
+        kl_cN = kld(
+            pc["shN"][gs_ids],
+            pc["shN_cov"][gs_ids],
+            pc["shN_prior"][gs_ids],
+            pc["shN_prior_cov"][gs_ids],
+        ).mean()
+        kl_loss += kl_cN
 
     # Opacity.
     if cfg.vi_opacities:
         kl_o = kld(
-            splats["opacities"],
-            splats["opacities_cov"],
-            splats["opacities_prior"],
-            splats["opacities_prior_cov"],
+            pc["opacities"][gs_ids],
+            pc["opacities_cov"][gs_ids],
+            pc["opacities_prior"][gs_ids],
+            pc["opacities_prior_cov"][gs_ids],
         ).mean()
         kl_loss += kl_o
 
     # Scale.
     if cfg.vi_scales:
         kl_s = kld(
-            splats["scales"][:, :2],
-            splats["scales_cov"],
-            splats["scales_prior"][:, :2],
-            splats["scales_prior_cov"],
+            pc["scales"][gs_ids, :2],
+            pc["scales_cov"][gs_ids],
+            pc["scales_prior"][gs_ids, :2],
+            pc["scales_prior_cov"][gs_ids],
         ).mean()
         kl_loss += kl_s
 
@@ -504,10 +496,10 @@ def compute_kl(splats: torch.nn.ParameterDict, cfg: Config) -> torch.Tensor:
     if cfg.vi_quats:
         kld_so3 = KLDivSO3NormalBCH()
         kl_R = kld_so3(
-            splats["quats"],
-            splats["quats_cov"],
-            splats["quats_prior"],
-            splats["quats_prior_cov"],
+            pc["quats"],
+            pc["quats_cov"],
+            pc["quats_prior"],
+            pc["quats_prior_cov"],
         ).mean()
         kl_loss += kl_R
 
@@ -558,7 +550,6 @@ class Runner:
         self.is_vi = False
 
         # Model
-        feature_dim = 32 if cfg.app_opt else None
         self.splats, self.optimizers = create_splats_with_optimizers(
             self.parser,
             init_type=cfg.init_type,
@@ -570,7 +561,7 @@ class Runner:
             sh_degree=cfg.sh_degree,
             sparse_grad=cfg.sparse_grad,
             batch_size=cfg.batch_size,
-            feature_dim=feature_dim,
+            feature_dim=None,
             device=self.device,
             posterior_lr=cfg.posterior_lr,
             prior_var_means=cfg.prior_var_means,
@@ -629,26 +620,6 @@ class Runner:
             self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
             self.pose_perturb.random_init(cfg.pose_noise)
 
-        self.app_optimizers = []
-        if cfg.app_opt:
-            self.app_module = AppearanceOptModule(
-                len(self.trainset), feature_dim, cfg.app_embed_dim, cfg.sh_degree
-            ).to(self.device)
-            # initialize the last layer to be zero so that the initial output is zero.
-            torch.nn.init.zeros_(self.app_module.color_head[-1].weight)
-            torch.nn.init.zeros_(self.app_module.color_head[-1].bias)
-            self.app_optimizers = [
-                torch.optim.Adam(
-                    self.app_module.embeds.parameters(),
-                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size) * 10.0,
-                    weight_decay=cfg.app_opt_reg,
-                ),
-                torch.optim.Adam(
-                    self.app_module.color_head.parameters(),
-                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size),
-                ),
-            ]
-
         # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
         self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
@@ -677,12 +648,117 @@ class Runner:
             "shN": Vec2Lower(3).to(self.device),
         }
 
+    def sample_splats(
+        self, pc: torch.nn.ParameterDict, gs_ids: Tensor
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """
+        Add random noise to the Gaussian primitives for Monte Carlo sampling.
+
+        Args:
+            pc: The Gaussian primitives.
+            gs_ids: The indices to sample.
+
+        Returns:
+            means: The sampled means.
+            quats: The sampled quaternions.
+            scales: The sampled scales.
+            opacities: The sampled opacities.
+            colors: The sampled colors.
+        """
+        # Return all if no gs_ids are provided.
+        if gs_ids is None:
+            gs_ids = torch.arange(len(pc["means"]), device=pc["means"].device)
+        else:
+            assert gs_ids.max() < len(pc["means"]), "gs_ids out of range"
+
+        if gs_ids.device != pc["means"].device:
+            gs_ids = gs_ids.to(pc["means"].device)
+
+        # Random sampling.
+        means = (
+            pc["means"][gs_ids]
+            + (
+                self.v2l["means"](pc["means_cov"][gs_ids])
+                @ torch.randn_like(pc["means"][gs_ids])[..., None]
+            ).squeeze(-1)
+            if self.cfg.vi_means
+            else pc["means"][gs_ids]
+        )  # [N, 3]
+        quats = (
+            a2q(
+                q2a(pc["quats"][gs_ids])
+                + (
+                    self.v2l["quats"](pc["quats_cov"][gs_ids])
+                    @ torch.randn_like(pc["quats"][gs_ids])[..., :3, None]
+                ).squeeze(-1)
+            )
+            if self.cfg.vi_quats
+            else pc["quats"][gs_ids]
+        )  # [N, 4]. Random on Lie algebra.
+        scales = (
+            torch.exp(
+                torch.cat(
+                    [
+                        pc["scales"][gs_ids, :2]
+                        + (
+                            self.v2l["scales"](pc["scales_cov"][gs_ids])
+                            @ torch.randn(
+                                pc["scales"][gs_ids].shape[0],
+                                2,
+                                device=pc["scales"].device,
+                            )[..., None]
+                        ).squeeze(-1),
+                        pc["scales"][gs_ids, 2:],
+                    ],
+                    dim=-1,
+                )
+            )
+            if self.cfg.vi_scales
+            else torch.exp(pc["scales"][gs_ids])
+        )  # [N, 3]. Random only on x and y axes.
+        opacities = (
+            torch.sigmoid(
+                pc["opacities"][gs_ids]
+                + (
+                    self.v2l["opacities"](pc["opacities_cov"][gs_ids])
+                    .squeeze(-1)
+                    .squeeze(-1)
+                    * torch.randn_like(pc["opacities"][gs_ids])
+                )
+            )
+            if self.cfg.vi_opacities
+            else torch.sigmoid(pc["opacities"][gs_ids])
+        )  # [N,]
+        sh0 = (
+            pc["sh0"][gs_ids]
+            + (
+                self.v2l["sh0"](pc["sh0_cov"][gs_ids])
+                @ torch.randn_like(pc["sh0"][gs_ids])[..., None]
+            ).squeeze(-1)
+            if self.cfg.vi_sh0
+            else pc["sh0"][gs_ids]
+        )  # [N, 1, 3]
+        shN = (
+            pc["shN"][gs_ids]
+            + (
+                self.v2l["shN"](pc["shN_cov"][gs_ids])
+                @ torch.randn_like(pc["shN"][gs_ids])[..., None]
+            ).squeeze(-1)
+            if self.cfg.vi_shN
+            else pc["shN"][gs_ids]
+        )  # [N, K-1, 3]
+        colors = torch.cat([sh0, shN], 1)  # [N, K, 3]
+
+        return means, quats, scales, opacities, colors
+
     def rasterize_splats(
         self,
+        pc: torch.nn.ParameterDict,
         camtoworlds: Tensor,
         Ks: Tensor,
         width: int,
         height: int,
+        gs_ids: Optional[Tensor] = None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Dict]:
         means: Optional[Tensor] = None
@@ -691,134 +767,24 @@ class Runner:
         opacities: Optional[Tensor] = None
         colors: Optional[Tensor] = None
 
-        if self.model_type == "esgs" and self.is_vi:
-            means = (
-                self.splats["means"]
-                + (
-                    self.v2l["means"](self.splats["means_cov"])
-                    @ torch.randn_like(self.splats["means"])[..., None]
-                ).squeeze(-1)
-                if self.cfg.vi_means
-                else self.splats["means"]
-            )  # [N, 3]
-            quats = (
-                a2q(
-                    q2a(self.splats["quats"])
-                    + (
-                        self.v2l["quats"](self.splats["quats_cov"])
-                        @ torch.randn_like(self.splats["quats"])[..., :3, None]
-                    ).squeeze(-1)
-                )
-                if self.cfg.vi_quats
-                else self.splats["quats"]
-            )  # [N, 4]. Random on Lie algebra.
-            scales = (
-                torch.exp(
-                    torch.cat(
-                        [
-                            self.splats["scales"][:, :2]
-                            + (
-                                self.v2l["scales"](self.splats["scales_cov"])
-                                @ torch.randn(
-                                    self.splats["scales"].shape[0],
-                                    2,
-                                    device=self.splats["scales"].device,
-                                )[..., None]
-                            ).squeeze(-1),
-                            self.splats["scales"][:, 2:],
-                        ],
-                        dim=-1,
-                    )
-                )
-                if self.cfg.vi_scales
-                else torch.exp(self.splats["scales"])
-            )  # [N, 3]. Random only on x and y axes.
-            opacities = (
-                torch.sigmoid(
-                    self.splats["opacities"]
-                    + (
-                        self.v2l["opacities"](self.splats["opacities_cov"])
-                        .squeeze(-1)
-                        .squeeze(-1)
-                        * torch.randn_like(self.splats["opacities"])
-                    )
-                )
-                if self.cfg.vi_opacities
-                else torch.sigmoid(self.splats["opacities"])
-            )  # [N,]
-
-            image_ids = kwargs.pop("image_ids", None)
-            if self.cfg.app_opt:
-                features = (
-                    self.splats["features"]
-                    + torch.einsum(
-                        "...ij,...j->...i",
-                        self.v2l["features"](self.splats["features_cov"]),
-                        torch.randn_like(self.splats["features"]),
-                    )
-                    if self.cfg.vi_features
-                    else self.splats["features"]
-                )  # [N, F]
-                colors = self.app_module(
-                    features=features,
-                    embed_ids=image_ids,
-                    dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
-                    sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
-                )
-                colors = (
-                    colors
-                    + self.splats["colors"]
-                    + torch.einsum(
-                        "...ij,...j->...i",
-                        self.v2l["colors"](self.splats["colors_cov"]),
-                        torch.randn_like(self.splats["colors"]),
-                    )
-                    if self.cfg.vi_colors
-                    else self.splats["colors"]
-                )  # [N, 3]
-                colors = torch.sigmoid(colors)
-            else:
-                sh0 = (
-                    self.splats["sh0"]
-                    + (
-                        self.v2l["sh0"](self.splats["sh0_cov"])
-                        @ torch.randn_like(self.splats["sh0"])[..., None]
-                    ).squeeze(-1)
-                    if self.cfg.vi_sh0
-                    else self.splats["sh0"]
-                )  # [N, 1, 3]
-                shN = (
-                    self.splats["shN"]
-                    + (
-                        self.v2l["shN"](self.splats["shN_cov"])
-                        @ torch.randn_like(self.splats["shN"])[..., None]
-                    ).squeeze(-1)
-                    if self.cfg.vi_shN
-                    else self.splats["shN"]
-                )  # [N, K-1, 3]
-                colors = torch.cat([sh0, shN], 1)  # [N, K, 3]
+        if gs_ids is None:
+            gs_ids = torch.arange(len(pc["means"]), device=pc["means"].device)
         else:
-            means = self.splats["means"]  # [N, 3]
-            # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
-            # rasterization does normalization internally
-            quats = self.splats["quats"]  # [N, 4]
-            scales = torch.exp(self.splats["scales"])  # [N, 3]
-            opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+            assert gs_ids.max() < len(pc["means"]), "gs_ids out of range"
 
-            image_ids = kwargs.pop("image_ids", None)
-            if self.cfg.app_opt:
-                colors = self.app_module(
-                    features=self.splats["features"],
-                    embed_ids=image_ids,
-                    dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
-                    sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
-                )
-                colors = colors + self.splats["colors"]
-                colors = torch.sigmoid(colors)
-            else:
-                colors = torch.cat(
-                    [self.splats["sh0"], self.splats["shN"]], 1
-                )  # [N, K, 3]
+        if self.model_type == "esgs" and self.is_vi:
+            # Random sampling.
+            means, quats, scales, opacities, colors = self.sample_splats(pc, gs_ids)
+        else:
+            means = self.splats["means"][gs_ids]  # [N, 3]
+            # quats = F.normalize(self.splats["quats"][gs_ids], dim=-1)  # [N, 4]
+            # rasterization does normalization internally
+            quats = self.splats["quats"][gs_ids]  # [N, 4]
+            scales = torch.exp(self.splats["scales"][gs_ids])  # [N, 3]
+            opacities = torch.sigmoid(self.splats["opacities"][gs_ids])  # [N,]
+            colors = torch.cat(
+                [self.splats["sh0"][gs_ids], self.splats["shN"][gs_ids]], 1
+            )  # [N, K, 3]
 
         assert self.cfg.antialiased is False, "Antialiased is not supported for 2DGS"
 
@@ -954,6 +920,7 @@ class Runner:
             # forward
             yc_hat = []
             yd_hat = []
+            gs_ids = torch.arange(len(self.splats["means"]), device=device)
             for rep in range(cfg.n_vi_sample if self.is_vi else 1):
                 torch.manual_seed(hash(str(cfg) + str(step) + str(rep)))
                 (
@@ -965,14 +932,15 @@ class Runner:
                     render_median,
                     info,
                 ) = self.rasterize_splats(
+                    pc=self.splats,
                     camtoworlds=camtoworlds,
                     Ks=Ks,
                     width=width,
                     height=height,
+                    gs_ids=gs_ids,
                     sh_degree=sh_degree_to_use,
                     near_plane=cfg.near_plane,
                     far_plane=cfg.far_plane,
-                    image_ids=image_ids,
                     render_mode="RGB+ED" if cfg.depth_loss else "RGB+D",
                     distloss=self.cfg.dist_loss,
                 )
@@ -988,12 +956,27 @@ class Runner:
                 yc_hat.append(colors)
                 yd_hat.append(depths)
 
+                if rep == 0:
+                    info0 = info
+
+                    if not cfg.full_sample:
+                        # Active Gaussian IDs at the first sampling.
+                        radii = info0["radii"].squeeze(0)  # [N, 2]
+                        means2d = info0["means2d"].squeeze(0)  # [N, 2]
+                        gs_ids = (
+                            (radii > 0).all(dim=-1)
+                            & (means2d[:, 0] + radii[:, 0] >= 0)
+                            & (means2d[:, 0] - radii[:, 0] < info0["width"])
+                            & (means2d[:, 1] + radii[:, 1] >= 0)
+                            & (means2d[:, 1] - radii[:, 1] < info0["height"])
+                        )  # [N,]
+
             self.strategy.step_pre_backward(
                 params=self.splats,
                 optimizers=self.optimizers,
                 state=self.strategy_state,
                 step=step,
-                info=info,
+                info=info0,
             )
             masks = data["mask"].to(device) if "mask" in data else None
             if masks is not None:
@@ -1043,7 +1026,7 @@ class Runner:
             if self.is_vi:
                 # KL divergence and AUSE losses.
                 if cfg.kl_lambda > 0.0:
-                    klloss = compute_kl(self.splats, cfg)
+                    klloss = compute_kl(pc=self.splats, cfg=cfg, gs_ids=gs_ids)
                     loss += klloss * cfg.kl_lambda
                 if cfg.aus_lambda > 0.0:
                     sc = EnhancedSparsificationCurves(
@@ -1195,9 +1178,6 @@ class Runner:
             for optimizer in self.pose_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.app_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
             for scheduler in schedulers:
                 scheduler.step()
 
@@ -1263,10 +1243,8 @@ class Runner:
             "quats" if cfg.vi_quats else None,
             "scales" if cfg.vi_scales else None,
             "opacities" if cfg.vi_opacities else None,
-            "features" if cfg.vi_features and cfg.app_opt else None,
-            "colors" if cfg.vi_colors and cfg.app_opt else None,
-            "sh0" if cfg.vi_sh0 and not cfg.app_opt else None,
-            "shN" if cfg.vi_shN and not cfg.app_opt else None,
+            "sh0" if cfg.vi_sh0 else None,
+            "shN" if cfg.vi_shN else None,
         ]
         print("VI options:", " ".join(o for o in opts if o))
 
@@ -1292,53 +1270,24 @@ class Runner:
                     .repeat(N, 1)
                     .requires_grad_(False)
                 )
-            if not cfg.app_opt:
-                if cfg.vi_sh0:
-                    self.splats["sh0_prior"] = (
-                        self.splats["sh0"].detach().clone().requires_grad_(False)
-                    )
-                    self.splats["sh0_prior_cov"] = (
-                        init_cholesky_params(
-                            [cfg.prior_var_sh0] * 3, device=self.device
-                        )
-                        .repeat(N, 1, 1)
-                        .requires_grad_(False)
-                    )
-                if cfg.vi_shN:
-                    self.splats["shN_prior"] = (
-                        self.splats["shN"].detach().clone().requires_grad_(False)
-                    )
-                    self.splats["shN_prior_cov"] = (
-                        init_cholesky_params(
-                            [cfg.prior_var_shN] * 3, device=self.device
-                        )
-                        .repeat(N, (cfg.sh_degree + 1) ** 2 - 1, 1)
-                        .requires_grad_(False)
-                    )
-            else:
-                if cfg.vi_colors:
-                    self.splats["colors_prior"] = (
-                        self.splats["colors"].detach().clone().requires_grad_(False)
-                    )
-                    self.splats["colors_prior_cov"] = (
-                        init_cholesky_params(
-                            [cfg.prior_var_colors] * 3, device=self.device
-                        )
-                        .repeat(N, 1)
-                        .requires_grad_(False)
-                    )
-                if cfg.vi_features:
-                    self.splats["features_prior"] = (
-                        self.splats["features"].detach().clone().requires_grad_(False)
-                    )
-                    self.splats["features_prior_cov"] = (
-                        init_cholesky_params(
-                            [cfg.prior_var_features] * 32, device=self.device
-                        )
-                        .repeat(N, 1)
-                        .requires_grad_(False)
-                    )
-
+            if cfg.vi_sh0:
+                self.splats["sh0_prior"] = (
+                    self.splats["sh0"].detach().clone().requires_grad_(False)
+                )
+                self.splats["sh0_prior_cov"] = (
+                    init_cholesky_params([cfg.prior_var_sh0] * 3, device=self.device)
+                    .repeat(N, 1, 1)
+                    .requires_grad_(False)
+                )
+            if cfg.vi_shN:
+                self.splats["shN_prior"] = (
+                    self.splats["shN"].detach().clone().requires_grad_(False)
+                )
+                self.splats["shN_prior_cov"] = (
+                    init_cholesky_params([cfg.prior_var_shN] * 3, device=self.device)
+                    .repeat(N, (cfg.sh_degree + 1) ** 2 - 1, 1)
+                    .requires_grad_(False)
+                )
             if cfg.vi_quats:
                 self.splats["quats_prior"] = (
                     self.splats["quats"].detach().clone().requires_grad_(False)
@@ -1385,6 +1334,7 @@ class Runner:
 
                 # Random sampling for uncertainty estimation.
                 yc_hat = []
+                gs_ids = torch.arange(len(self.splats["means"]), device=device)
                 for rep in range(cfg.n_vi_sample):
                     torch.manual_seed(hash(str(cfg) + str(step) + str(rep)))
                     (
@@ -1394,12 +1344,14 @@ class Runner:
                         normals_from_depth,
                         render_distort,
                         render_median,
-                        _,
+                        info,
                     ) = self.rasterize_splats(
+                        pc=self.splats,
                         camtoworlds=camtoworlds,
                         Ks=Ks,
                         width=width,
                         height=height,
+                        gs_ids=gs_ids,
                         sh_degree=cfg.sh_degree,
                         near_plane=cfg.near_plane,
                         far_plane=cfg.far_plane,
@@ -1409,6 +1361,18 @@ class Runner:
                     colors = torch.clamp(colors, 0.0, 1.0)
                     colors = colors[..., :3]  # Take RGB channels
                     yc_hat.append(colors)
+
+                    if not cfg.full_sample and rep == 0:
+                        # Active Gaussian IDs at the first sampling.
+                        radii = info["radii"].squeeze(0)  # [N, 2]
+                        means2d = info["means2d"].squeeze(0)  # [N, 2]
+                        gs_ids = (
+                            (radii > 0).all(dim=-1)
+                            & (means2d[:, 0] + radii[:, 0] >= 0)
+                            & (means2d[:, 0] - radii[:, 0] < info["width"])
+                            & (means2d[:, 1] + radii[:, 1] >= 0)
+                            & (means2d[:, 1] - radii[:, 1] < info["height"])
+                        )  # [N,]
 
                     imageio.imwrite(
                         f"{self.render_dir}/val_{i:04d}_sample_{rep}_{step}.png",
@@ -1508,6 +1472,7 @@ class Runner:
                 render_median,
                 _,
             ) = self.rasterize_splats(
+                pc=self.splats,
                 camtoworlds=camtoworlds,
                 Ks=Ks,
                 width=width,
@@ -1691,6 +1656,7 @@ class Runner:
         canvas_all = []
         for i in tqdm.trange(len(camtoworlds), desc="Rendering trajectory"):
             renders, _, _, surf_normals, _, _, _ = self.rasterize_splats(
+                pc=self.splats,
                 camtoworlds=camtoworlds[i : i + 1],
                 Ks=K[None],
                 width=width,
@@ -1749,6 +1715,7 @@ class Runner:
             render_median,
             info,
         ) = self.rasterize_splats(
+            pc=self.splats,
             camtoworlds=c2w[None],
             Ks=K[None],
             width=width,
