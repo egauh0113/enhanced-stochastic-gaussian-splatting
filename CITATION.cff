@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this work, please cite it as follows:"
+title: "Enhanced Stochastic Gaussian Splatting via Laplace Negative Log-Likelihood and Geometry-Aware Losses"
+authors:
+  - family-names: "Auh"
+    given-names: "Eugene"
+    orcid: "https://orcid.org/0000-0001-9349-5046"
+  - family-names: "Siriwa"
+    given-names: "Jenipher"
+  - family-names: "Pico"
+    given-names: "Nabih"
+  - family-names: "Balozi"
+    given-names: "Nehemiah"
+  - family-names: "Moon"
+    given-names: "Hyungpil"
+type: conference-paper
+year: 2026
+conference:
+  name: "2026 IEEE International Conference on Advanced Robotics and its Social Impacts (ARSO)"
+publisher:
+  name: IEEE
+pages: "112-117"
+doi: "10.1109/ARSO68304.2026.11536110"
