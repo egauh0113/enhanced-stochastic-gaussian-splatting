@@ -28,8 +28,13 @@ Detailed dependencies are listed in *pyproject.toml* and *requirements.txt*.
 
 ### Efficient Optimization
 
-In *v0.1.1*, images are sampled and the KL divergence loss is computed using the currently active GSs.
+In *v0.1.1*, images are sampled and the KL divergence loss is computed using the currently active subset of GSs.
 To use entire set of GSs, set *full_sample* to *True* in *simple_trainer_esgs.py*, which corresponds to the results reported in the paper.
+
+### 3DGS Support
+
+In *v0.1.2*, a 3DGS implementation of E-SGS has been added.
+To run the 3DGS version, execute *scripts/basic_3d-esgs.sh*.
 
 ## Citation
 
@@ -54,5 +59,22 @@ We would like to thank to the authors of following works.
 ## Changelog
 
 - *v0.1.0*: Initial release.
-- *v0.1.1*: Perform MC sampling and KLD computation only on useful GSs.  
+- *v0.1.1*: Optimized MC sampling and KLD computation by processing only useful GSs.
   - Reduced training time by ~50% while maintaining the same level of evaluation metrics. (tested on the  *garden* scene of the Mip-NeRF 360 dataset)
+- *v0.1.1*: Added support for 3DGS.
+
+### Quantitative Evaluation
+
+Test results on the Mip-NeRF 360 dataset.
+
+| Method | Ver.          | PSNR  | SSIM  | LPIPS | AUSE-RMSE | AUSE-MAE |
+| ---    | ---           | ---   | ---   | ---   | ---       | ---      |
+| 3DGS   | gsplat v1.5.3 | 29.79 | 0.912 | 0.049 | N/A       | N/A      |
+| 2DGS   | gsplat v1.5.3 | 29.48 | 0.901 | 0.055 | N/A       | N/A      |
+| SGS    |               | 26.30 | 0.873 | 0.091 | 0.0139    | 0.0084   |
+| E-SGS  | v0.1.0 (2DGS) | 28.58 | 0.885 | 0.070 | 0.0169    | 0.0087   |
+|        | v0.1.1 (2DGS) | 27.59 | 0.874 | 0.082 | 0.0182    | 0.0091   |
+|        | v0.1.2 (3DGS) | 28.95 | 0.898 | 0.062 | 0.0165    | 0.0082   |
+
+> ※ Unexpected densifications were observed when testing *v0.1.1 (2DGS)* on the *bicycle* scene.
+The corrected results will be updated later.

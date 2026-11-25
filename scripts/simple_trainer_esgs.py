@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # -----------------------------------------------------------------------------
 # Copyright 2026 Eugene Auh
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #       http://www.apache.org/licenses/LICENSE-2.0
-
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -32,7 +32,6 @@ from typing import Dict, List, Literal, Optional, Tuple
 from pathlib import Path
 
 import imageio
-import nerfview
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -45,15 +44,7 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-from utils import (
-    AppearanceOptModule,
-    CameraOptModule,
-    apply_depth_colormap,
-    colormap,
-    knn,
-    rgb_to_sh,
-    set_random_seed,
-)
+from utils import CameraOptModule, knn, rgb_to_sh, set_random_seed
 from gsplat_viewer_2dgs import GsplatViewer, GsplatRenderTabState
 from gsplat.rendering import rasterization_2dgs, rasterization_2dgs_inria_wrapper
 from gsplat.strategy import DefaultStrategy
@@ -238,8 +229,6 @@ class Config:
     vi_opacities: bool = True
     vi_sh0: bool = True
     vi_shN: bool = vi_sh0 and True  # Disable if SH0 is disabled.
-    vi_features: bool = True  # NOT TESTED.
-    vi_colors: bool = True  # NOT TESTED.
 
     # Learning rate for the posterior parameters.
     posterior_lr: float = 1e-4
@@ -251,8 +240,6 @@ class Config:
     prior_var_opacities: float = 1e-4
     prior_var_sh0: float = 1e-4
     prior_var_shN: float = 1e-4
-    prior_var_features: float = 1e-4  # NOT TESTED.
-    prior_var_colors: float = 1e-4  # NOT TESTED.
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -276,7 +263,6 @@ def create_splats_with_optimizers(
     sh_degree: int = 3,
     sparse_grad: bool = False,
     batch_size: int = 1,
-    feature_dim: Optional[int] = None,
     device: str = "cuda",
     posterior_lr: float = 1e-4,
     prior_var_means: float = 1e-6,
@@ -285,8 +271,6 @@ def create_splats_with_optimizers(
     prior_var_opacities: float = 1e-6,
     prior_var_sh0: float = 1e-6,
     prior_var_shN: float = 1e-6,
-    prior_var_features: float = 1e-6,
-    prior_var_colors: float = 1e-6,
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
     if init_type == "sfm":
         points = torch.from_numpy(parser.points).float()
@@ -342,66 +326,33 @@ def create_splats_with_optimizers(
         ),
     ]
 
-    if feature_dim is None:
-        # color is SH coefficients.
-        colors = torch.zeros((N, (sh_degree + 1) ** 2, 3))  # [N, K, 3]
-        colors[:, 0, :] = rgb_to_sh(rgbs)
-        params.append(("sh0", torch.nn.Parameter(colors[:, :1, :]), 2.5e-3))
-        params.append(("shN", torch.nn.Parameter(colors[:, 1:, :]), 2.5e-3 / 20))
+    # color is SH coefficients.
+    colors = torch.zeros((N, (sh_degree + 1) ** 2, 3))  # [N, K, 3]
+    colors[:, 0, :] = rgb_to_sh(rgbs)
+    params.append(("sh0", torch.nn.Parameter(colors[:, :1, :]), 2.5e-3))
+    params.append(("shN", torch.nn.Parameter(colors[:, 1:, :]), 2.5e-3 / 20))
 
-        # Covariances for VI.
-        params.append(
-            (
-                "sh0_cov",
-                torch.nn.Parameter(
-                    init_cholesky_params([prior_var_sh0] * 3, device=device).repeat(
-                        N, 1, 1
-                    )
-                ),
-                posterior_lr if not posterior_lr == 0.0 else 2.5e-3,
-            )
+    # Covariances for VI.
+    params.append(
+        (
+            "sh0_cov",
+            torch.nn.Parameter(
+                init_cholesky_params([prior_var_sh0] * 3, device=device).repeat(N, 1, 1)
+            ),
+            posterior_lr if not posterior_lr == 0.0 else 2.5e-3,
         )
-        params.append(
-            (
-                "shN_cov",
-                torch.nn.Parameter(
-                    init_cholesky_params([prior_var_shN] * 3, device=device).repeat(
-                        N, (sh_degree + 1) ** 2 - 1, 1
-                    )
-                ),
-                posterior_lr if not posterior_lr == 0.0 else 2.5e-3 / 20,
-            )
+    )
+    params.append(
+        (
+            "shN_cov",
+            torch.nn.Parameter(
+                init_cholesky_params([prior_var_shN] * 3, device=device).repeat(
+                    N, (sh_degree + 1) ** 2 - 1, 1
+                )
+            ),
+            posterior_lr if not posterior_lr == 0.0 else 2.5e-3 / 20,
         )
-    else:
-        # features will be used for appearance and view-dependent shading
-        features = torch.rand(N, feature_dim)  # [N, feature_dim]
-        params.append(("features", torch.nn.Parameter(features), 2.5e-3))
-        colors = torch.logit(rgbs)  # [N, 3]
-        params.append(("colors", torch.nn.Parameter(colors), 2.5e-3))
-
-        # Covariances for VI.
-        params.append(
-            (
-                "features_cov",
-                torch.nn.Parameter(
-                    init_cholesky_params(
-                        [prior_var_features] * feature_dim, device=device
-                    ).repeat(N, 1)
-                ),
-                posterior_lr if not posterior_lr == 0.0 else 2.5e-3,
-            )
-        )
-        params.append(
-            (
-                "colors_cov",
-                torch.nn.Parameter(
-                    init_cholesky_params([prior_var_colors] * 3, device=device).repeat(
-                        N, 1
-                    )
-                ),
-                posterior_lr if not posterior_lr == 0.0 else 2.5e-3,
-            )
-        )
+    )
 
     splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
     # Scale learning rate based on batch size, reference:
@@ -561,7 +512,6 @@ class Runner:
             sh_degree=cfg.sh_degree,
             sparse_grad=cfg.sparse_grad,
             batch_size=cfg.batch_size,
-            feature_dim=None,
             device=self.device,
             posterior_lr=cfg.posterior_lr,
             prior_var_means=cfg.prior_var_means,
@@ -570,8 +520,6 @@ class Runner:
             prior_var_opacities=cfg.prior_var_opacities,
             prior_var_sh0=cfg.prior_var_sh0,
             prior_var_shN=cfg.prior_var_shN,
-            prior_var_features=cfg.prior_var_features,
-            prior_var_colors=cfg.prior_var_colors,
         )
         print("Model initialized. Number of GS:", len(self.splats["means"]))
         self.model_type = cfg.model_type
@@ -1233,9 +1181,9 @@ class Runner:
 
         # Transition the model to VI mode.
         print("Transitioning to Variational Inference mode.")
-        print("Sampling number:", cfg.n_vi_sample)
-        print(f"Posterior LR: {cfg.posterior_lr}")
-        print("KLD weight :", cfg.kl_lambda)
+        print("Sample size:", cfg.n_vi_sample)
+        print("Posterior LR:", cfg.posterior_lr)
+        print("KLD weight:", cfg.kl_lambda)
         print("AUSE weight:" if cfg.use_ause else "AUSC weight:", cfg.aus_lambda)
         print("NLL diversity:", cfg.div_tilde) if cfg.use_nll_loss else None
         opts = [
@@ -1530,7 +1478,6 @@ class Runner:
             )
 
             # write distortions
-
             render_dist = render_distort
             dist_max = torch.max(render_dist)
             dist_min = torch.min(render_dist)

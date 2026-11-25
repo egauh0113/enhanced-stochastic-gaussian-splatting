@@ -45,7 +45,7 @@ do
 
     echo "=== Train Stats ==="
 
-    for STATS in ../$RESULT_DIR/$SCENE/stats/train*_rank0.json;
+    for STATS in ../$RESULT_DIR/$SCENE/stats/train*.json;
     do  
         echo $STATS
         cat $STATS; 
